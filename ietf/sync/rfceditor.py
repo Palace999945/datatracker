@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2012-2020, All Rights Reserved
+# Copyright The IETF Trust 2012-2025, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from xml.dom import pulldom, Node
 
 from django.conf import settings
+from django.db import transaction
 from django.db.models import Subquery, OuterRef, F, Q
 from django.utils import timezone
 from django.utils.encoding import smart_bytes, force_str
@@ -30,9 +31,9 @@ from ietf.utils.log import log
 from ietf.utils.mail import send_mail_text
 from ietf.utils.timezone import datetime_from_date, RPC_TZINFO
 
-#QUEUE_URL = "https://www.rfc-editor.org/queue2.xml"
-#INDEX_URL = "https://www.rfc-editor.org/rfc/rfc-index.xml"
-#POST_APPROVED_DRAFT_URL = "https://www.rfc-editor.org/sdev/jsonexp/jsonparser.php"
+# QUEUE_URL = "https://www.rfc-editor.org/queue2.xml"
+# INDEX_URL = "https://www.rfc-editor.org/rfc/rfc-index.xml"
+# POST_APPROVED_DRAFT_URL = "https://www.rfc-editor.org/sdev/jsonexp/jsonparser.php"
 
 MIN_ERRATA_RESULTS = 5000
 MIN_INDEX_RESULTS = 8000
@@ -114,6 +115,8 @@ def parse_queue(response):
                     stream = "irtf"
                 elif name.startswith("INDEPENDENT"):
                     stream = "ise"
+                elif name.startswith("Editorial Stream"):
+                    stream = "editorial"
                 else:
                     stream = None
                     warnings.append("unrecognized section " + name)
@@ -427,7 +430,7 @@ def update_docs_from_rfc_index(
                 pass
                 # Logging below warning turns out to be unhelpful - there are many references
                 # to such things in the index:
-                # * all april-1 RFCs have an internal name that looks like a draft name, but there 
+                # * all april-1 RFCs have an internal name that looks like a draft name, but there
                 # was never such a draft. More of these will exist in the future
                 # * Several documents were created with out-of-band input to the RFC-editor, for a
                 # variety of reasons.
@@ -436,7 +439,7 @@ def update_docs_from_rfc_index(
                 # If there is no draft to point to, don't point to one, even if there was an RPC
                 # internal name in use (and in the RPC database). This will be a requirement on the
                 # reimplementation of the creation of the rfc-index.
-                # 
+                #
                 # log(f"Warning: RFC index for {rfc_number} referred to unknown draft {draft_name}")
 
         # Find or create the RFC document
@@ -465,14 +468,18 @@ def update_docs_from_rfc_index(
             doc.set_state(rfc_published_state)
             if draft:
                 doc.formal_languages.set(draft.formal_languages.all())
-                for author in draft.documentauthor_set.all():
-                    # Copy the author but point at the new doc. 
+                # Create authors based on the last draft in the datatracker. This
+                # path will go away when we publish via the modernized RPC workflow
+                # but until then, these are the only data we have for authors that
+                # are easily connected to Person records.
+                for documentauthor in draft.documentauthor_set.all():
+                    # Copy the author but point at the new doc.
                     # See https://docs.djangoproject.com/en/4.2/topics/db/queries/#copying-model-instances
-                    author.pk = None
-                    author.id = None
-                    author._state.adding = True
-                    author.document = doc
-                    author.save()
+                    documentauthor.pk = None
+                    documentauthor.id = None
+                    documentauthor._state.adding = True
+                    documentauthor.document = doc
+                    documentauthor.save()
 
         if draft:
             draft_events = []
@@ -629,43 +636,70 @@ def update_docs_from_rfc_index(
             )
             rfc_published = True
 
-        def parse_relation_list(l):
-            res = []
-            for x in l:
-                for a in Document.objects.filter(name=x.lower(), type_id="rfc"):
-                    if a not in res:
-                        res.append(a)
-            return res
+        def parse_relation_list(rel_list: list[str]) -> list[Document]:
+            return list(
+                Document.objects.filter(
+                    name__in=[name.strip().lower() for name in rel_list],
+                    type_id="rfc"
+                )
+            )
 
-        for x in parse_relation_list(obsoletes):
-            if not RelatedDocument.objects.filter(
-                source=doc, target=x, relationship=relationship_obsoletes
+        # Create missing obsoletes relations
+        docs_this_obsoletes = parse_relation_list(obsoletes)
+        for obs_doc in docs_this_obsoletes:
+            if not doc.relateddocument_set.filter(
+                target=obs_doc, relationship=relationship_obsoletes
             ):
-                r = RelatedDocument.objects.create(
-                    source=doc, target=x, relationship=relationship_obsoletes
+                r = doc.relateddocument_set.create(
+                    target=obs_doc, relationship=relationship_obsoletes
                 )
                 rfc_changes.append(
-                    "created {rel_name} relation between {src_name} and {tgt_name}".format(
+                    "created {rel_name} relation between {src} and {tgt}".format(
                         rel_name=r.relationship.name.lower(),
-                        src_name=prettify_std_name(r.source.name),
-                        tgt_name=prettify_std_name(r.target.name),
+                        src=prettify_std_name(r.source.name),
+                        tgt=prettify_std_name(r.target.name),
                     )
                 )
+        # Remove stale obsoletes relations
+        for r in doc.relateddocument_set.filter(
+            relationship=relationship_obsoletes
+        ).exclude(target_id__in=[d.pk for d in docs_this_obsoletes]):
+            r.delete()
+            rfc_changes.append(
+                "removed {rel_name} relation between {src} and {tgt}".format(
+                    rel_name=r.relationship.name.lower(),
+                    src=prettify_std_name(r.source.name),
+                    tgt=prettify_std_name(r.target.name),
+                )
+            )
 
-        for x in parse_relation_list(updates):
+        docs_this_updates = parse_relation_list(updates)
+        for upd_doc in docs_this_updates:
             if not RelatedDocument.objects.filter(
-                source=doc, target=x, relationship=relationship_updates
+                source=doc, target=upd_doc, relationship=relationship_updates
             ):
-                r = RelatedDocument.objects.create(
-                    source=doc, target=x, relationship=relationship_updates
+                r = doc.relateddocument_set.create(
+                    target=upd_doc, relationship=relationship_updates
                 )
                 rfc_changes.append(
-                    "created {rel_name} relation between {src_name} and {tgt_name}".format(
+                    "created {rel_name} relation between {src} and {tgt}".format(
                         rel_name=r.relationship.name.lower(),
-                        src_name=prettify_std_name(r.source.name),
-                        tgt_name=prettify_std_name(r.target.name),
+                        src=prettify_std_name(r.source.name),
+                        tgt=prettify_std_name(r.target.name),
                     )
                 )
+        # Remove stale updates relations
+        for r in doc.relateddocument_set.filter(
+            relationship=relationship_updates
+        ).exclude(target_id__in=[d.pk for d in docs_this_updates]):
+            r.delete()
+            rfc_changes.append(
+                "removed {rel_name} relation between {src} and {tgt}".format(
+                    rel_name=r.relationship.name.lower(),
+                    src=prettify_std_name(r.source.name),
+                    tgt=prettify_std_name(r.target.name),
+                )
+            )
 
         if also:
             # recondition also to have proper subseries document names:
@@ -675,11 +709,11 @@ def update_docs_from_rfc_index(
                 subseries_slug = a[:3]
                 if subseries_slug not in ["bcp", "std", "fyi"]:
                     log(f"Unexpected 'also' relationship of {a} encountered for {doc}")
-                    next
+                    continue
                 maybe_number = a[3:].strip()
                 if not maybe_number.isdigit():
                     log(f"Unexpected 'also' subseries element identifier {a} encountered for {doc}")
-                    next
+                    continue
                 else:
                     subseries_number = int(maybe_number)
                     conditioned_also.append(f"{subseries_slug}{subseries_number}") # Note the lack of leading zeros
@@ -707,12 +741,27 @@ def update_docs_from_rfc_index(
                         subseries_doc.docevent_set.create(type="sync_from_rfc_editor", by=system, desc=f"Added {doc.name} to {subseries_doc.name}")
                         rfc_events.append(doc.docevent_set.create(type="sync_from_rfc_editor", by=system, desc=f"Added {doc.name} to {subseries_doc.name}"))
 
-        for subdoc in doc.related_that("contains"):
-            if subdoc.name not in also:
-                assert(not first_sync_creating_subseries)
-                subseries_doc.relateddocument_set.filter(target=subdoc).delete()
-                rfc_events.append(doc.docevent_set.create(type="sync_from_rfc_editor", by=system, desc=f"Removed {doc.name} from {subseries_doc.name}"))
-                subseries_doc.docevent_set.create(type="sync_from_rfc_editor", by=system, desc=f"Removed {doc.name} from {subseries_doc.name}")
+        # Delete subseries relations that are no longer current. Use a transaction
+        # so we are sure we iterate over the same relations that we delete!
+        with transaction.atomic():
+            stale_subseries_relations = doc.relations_that("contains").exclude(
+                source__name__in=also
+            )
+            for stale_relation in stale_subseries_relations:
+                stale_subseries_doc = stale_relation.source
+                rfc_events.append(
+                    doc.docevent_set.create(
+                        type="sync_from_rfc_editor",
+                        by=system,
+                        desc=f"Removed {doc.name} from {stale_subseries_doc.name}",
+                    )
+                )
+                stale_subseries_doc.docevent_set.create(
+                    type="sync_from_rfc_editor",
+                    by=system,
+                    desc=f"Removed {doc.name} from {stale_subseries_doc.name}",
+                )
+            stale_subseries_relations.delete()
 
         doc_errata = errata.get(f"RFC{rfc_number}", [])
         all_rejected = doc_errata and all(
@@ -754,9 +803,9 @@ def update_docs_from_rfc_index(
             )
             doc.save_with_history(rfc_events)
             yield rfc_number, rfc_changes, doc, rfc_published  # yield changes to the RFC
-    
+
     if first_sync_creating_subseries:
-        # First - create the known subseries documents that have ghosted. 
+        # First - create the known subseries documents that have ghosted.
         # The RFC editor (as of 31 Oct 2023) claims these subseries docs do not exist.
         # The datatracker, on the other hand, will say that the series doc currently contains no RFCs.
         for name in ["fyi17", "std1", "bcp12", "bcp113", "bcp66"]:
@@ -768,7 +817,6 @@ def update_docs_from_rfc_index(
             else:
                 subseries_slug = name[:3]
                 subseries_doc.docevent_set.create(type=f"{subseries_slug}_history_marker", by=system, desc=f"No history of this {subseries_slug.upper()} document is currently available in the datatracker before this point")
-
 
         RelatedDocument.objects.filter(
             Q(originaltargetaliasname__startswith="bcp") |

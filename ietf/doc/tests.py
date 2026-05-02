@@ -10,7 +10,7 @@ from hashlib import sha384
 from django.http import HttpRequest
 import lxml
 import bibtexparser
-import mock
+from unittest import mock
 import json
 import copy
 import random
@@ -39,11 +39,15 @@ import debug                            # pyflakes:ignore
 from ietf.doc.models import ( Document, DocRelationshipName, RelatedDocument, State,
     DocEvent, BallotPositionDocEvent, LastCallDocEvent, WriteupDocEvent, NewRevisionDocEvent, BallotType,
     EditedAuthorsDocEvent, StateType)
-from ietf.doc.factories import ( DocumentFactory, DocEventFactory, CharterFactory,
-    ConflictReviewFactory, WgDraftFactory, IndividualDraftFactory, WgRfcFactory, 
-    IndividualRfcFactory, StateDocEventFactory, BallotPositionDocEventFactory, 
-    BallotDocEventFactory, DocumentAuthorFactory, NewRevisionDocEventFactory,
-    StatusChangeFactory, DocExtResourceFactory, RgDraftFactory, BcpFactory)
+from ietf.doc.factories import (DocumentFactory, DocEventFactory, CharterFactory,
+                                ConflictReviewFactory, WgDraftFactory,
+                                IndividualDraftFactory, WgRfcFactory,
+                                IndividualRfcFactory, StateDocEventFactory,
+                                BallotPositionDocEventFactory,
+                                BallotDocEventFactory, DocumentAuthorFactory,
+                                NewRevisionDocEventFactory,
+                                StatusChangeFactory, DocExtResourceFactory,
+                                RgDraftFactory, BcpFactory, RfcAuthorFactory)
 from ietf.doc.forms import NotifyForm
 from ietf.doc.fields import SearchableDocumentsField
 from ietf.doc.utils import (
@@ -66,7 +70,7 @@ from ietf.meeting.factories import ( MeetingFactory, SessionFactory, SessionPres
 from ietf.name.models import SessionStatusName, BallotPositionName, DocTypeName, RoleName
 from ietf.person.models import Person
 from ietf.person.factories import PersonFactory, EmailFactory
-from ietf.utils.mail import outbox, empty_outbox
+from ietf.utils.mail import get_payload_text, outbox, empty_outbox
 from ietf.utils.test_utils import login_testing_unauthorized, unicontent
 from ietf.utils.test_utils import TestCase
 from ietf.utils.text import normalize_text
@@ -403,6 +407,30 @@ class SearchTests(TestCase):
         self.assertContains(r, discuss_other.doc.name)
         self.assertContains(r, block_other.doc.name)
 
+    def test_docs_for_iesg(self):
+        ad1 = RoleFactory(name_id='ad',group__type_id='area',group__state_id='active').person
+        ad2 = RoleFactory(name_id='ad',group__type_id='area',group__state_id='active').person
+
+        draft = IndividualDraftFactory(ad=ad1)
+        draft.action_holders.set([PersonFactory()])
+        draft.set_state(State.objects.get(type='draft-iesg', slug='lc'))
+        rfc = IndividualRfcFactory(ad=ad2)
+        conflrev = DocumentFactory(type_id='conflrev',ad=ad1)
+        conflrev.set_state(State.objects.get(type='conflrev', slug='iesgeval'))
+        statchg = DocumentFactory(type_id='statchg',ad=ad2)
+        statchg.set_state(State.objects.get(type='statchg', slug='iesgeval'))
+        charter = CharterFactory(name='charter-ietf-ames',ad=ad1)
+        charter.set_state(State.objects.get(type='charter', slug='iesgrev'))
+
+        r = self.client.get(urlreverse('ietf.doc.views_search.docs_for_iesg'))
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, draft.name)
+        self.assertContains(r, escape(draft.action_holders.first().name))
+        self.assertNotContains(r, rfc.name)
+        self.assertContains(r, conflrev.name)
+        self.assertContains(r, statchg.name)
+        self.assertContains(r, charter.name)
+
     def test_auth48_doc_for_ad(self):
         """Docs in AUTH48 state should have a decoration"""
         ad = RoleFactory(name_id='ad', group__type_id='area', group__state_id='active').person
@@ -425,17 +453,6 @@ class SearchTests(TestCase):
         self.assertContains(r, draft.title)
         self.assertContains(r, escape(draft.action_holders.first().name))
 
-    def test_in_iesg_process(self):
-        doc_in_process = IndividualDraftFactory()
-        doc_in_process.action_holders.set([PersonFactory()])
-        doc_in_process.set_state(State.objects.get(type='draft-iesg', slug='lc'))
-        doc_not_in_process = IndividualDraftFactory()
-        r = self.client.get(urlreverse('ietf.doc.views_search.drafts_in_iesg_process'))
-        self.assertEqual(r.status_code, 200)
-        self.assertContains(r, doc_in_process.title)
-        self.assertContains(r, escape(doc_in_process.action_holders.first().name))
-        self.assertNotContains(r, doc_not_in_process.title)
-        
     def test_indexes(self):
         draft = IndividualDraftFactory()
         rfc = WgRfcFactory()
@@ -966,7 +983,7 @@ Man                    Expires September 22, 2015               [Page 3]
         # Relevant users not authorized to edit authors
         unauthorized_usernames = [
             'plain',
-            *[author.user.username for author in draft.authors()],
+            *[author.user.username for author in draft.author_persons()],
             draft.group.get_chair().person.user.username,
             'ad'
         ]
@@ -981,7 +998,7 @@ Man                    Expires September 22, 2015               [Page 3]
         self.client.logout()
 
         # Try to add an author via POST - still only the secretary should be able to do this.
-        orig_authors = draft.authors()
+        orig_authors = draft.author_persons()
         post_data = self.make_edit_authors_post_data(
             basis='permission test',
             authors=draft.documentauthor_set.all(),
@@ -999,12 +1016,12 @@ Man                    Expires September 22, 2015               [Page 3]
         for username in unauthorized_usernames:
             login_testing_unauthorized(self, username, url, method='post', request_kwargs=dict(data=post_data))
             draft = Document.objects.get(pk=draft.pk)
-            self.assertEqual(draft.authors(), orig_authors)  # ensure draft author list was not modified
+            self.assertEqual(draft.author_persons(), orig_authors)  # ensure draft author list was not modified
         login_testing_unauthorized(self, 'secretary', url, method='post', request_kwargs=dict(data=post_data))
         r = self.client.post(url, post_data)
         self.assertEqual(r.status_code, 302)
         draft = Document.objects.get(pk=draft.pk)
-        self.assertEqual(draft.authors(), orig_authors + [new_auth_person])
+        self.assertEqual(draft.author_persons(), orig_authors + [new_auth_person])
 
     def make_edit_authors_post_data(self, basis, authors):
         """Helper to generate edit_authors POST data for a set of authors"""
@@ -1352,8 +1369,8 @@ Man                    Expires September 22, 2015               [Page 3]
             basis=change_reason
         )
 
-        old_address = draft.authors()[0].email()
-        new_email = EmailFactory(person=draft.authors()[0], address=f'changed-{old_address}')
+        old_address = draft.author_persons()[0].email()
+        new_email = EmailFactory(person=draft.author_persons()[0], address=f'changed-{old_address}')
         post_data['author-0-email'] = new_email.address
         post_data['author-1-affiliation'] = 'University of Nowhere'
         post_data['author-2-country'] = 'Chile'
@@ -1386,17 +1403,17 @@ Man                    Expires September 22, 2015               [Page 3]
         country_event = change_events.filter(desc__icontains='changed country').first()
 
         self.assertIsNotNone(email_event)
-        self.assertIn(draft.authors()[0].name, email_event.desc)
+        self.assertIn(draft.author_persons()[0].name, email_event.desc)
         self.assertIn(before[0]['email'], email_event.desc)
         self.assertIn(after[0]['email'], email_event.desc)
 
         self.assertIsNotNone(affiliation_event)
-        self.assertIn(draft.authors()[1].name, affiliation_event.desc)
+        self.assertIn(draft.author_persons()[1].name, affiliation_event.desc)
         self.assertIn(before[1]['affiliation'], affiliation_event.desc)
         self.assertIn(after[1]['affiliation'], affiliation_event.desc)
 
         self.assertIsNotNone(country_event)
-        self.assertIn(draft.authors()[2].name, country_event.desc)
+        self.assertIn(draft.author_persons()[2].name, country_event.desc)
         self.assertIn(before[2]['country'], country_event.desc)
         self.assertIn(after[2]['country'], country_event.desc)
 
@@ -1850,13 +1867,63 @@ class DocTestCase(TestCase):
 
     def test_document_json(self):
         doc = IndividualDraftFactory()
-
+        author = DocumentAuthorFactory(document=doc)
+        
         r = self.client.get(urlreverse("ietf.doc.views_doc.document_json", kwargs=dict(name=doc.name)))
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        self.assertEqual(doc.name, data['name'])
-        self.assertEqual(doc.pages,data['pages'])
+        self.assertEqual(data["name"], doc.name)
+        self.assertEqual(data["pages"], doc.pages)
+        self.assertEqual(
+            data["authors"],
+            [
+                {
+                    "name": author.person.name,
+                    "email": author.email.address,
+                    "affiliation": author.affiliation,
+                }
+            ]
+        )
 
+    def test_document_json_rfc(self):
+        doc = IndividualRfcFactory()
+        old_style_author = DocumentAuthorFactory(document=doc)
+        url = urlreverse("ietf.doc.views_doc.document_json", kwargs=dict(name=doc.name))
+
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["name"], doc.name)
+        self.assertEqual(data["pages"], doc.pages)
+        self.assertEqual(
+            data["authors"],
+            [
+                {
+                    "name": old_style_author.person.name,
+                    "email": old_style_author.email.address,
+                    "affiliation": old_style_author.affiliation,
+                }
+            ]
+        )
+    
+        new_style_author = RfcAuthorFactory(document=doc)
+        r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["name"], doc.name)
+        self.assertEqual(data["pages"], doc.pages)
+        self.assertEqual(
+            data["authors"],
+            [
+                {
+                    "name": new_style_author.titlepage_name,
+                    "email": new_style_author.email.address,
+                    "affiliation": new_style_author.affiliation,
+                }
+            ]
+        )
+
+    
     def test_writeup(self):
         doc = IndividualDraftFactory(states = [('draft','active'),('draft-iesg','iesg-eva')],)
 
@@ -2148,20 +2215,19 @@ class DocTestCase(TestCase):
 
 class AddCommentTestCase(TestCase):
     def test_add_comment(self):
-        draft = WgDraftFactory(name='draft-ietf-mars-test',group__acronym='mars')
-        url = urlreverse('ietf.doc.views_doc.add_comment', kwargs=dict(name=draft.name))
+        draft = WgDraftFactory(name="draft-ietf-mars-test", group__acronym="mars")
+        url = urlreverse("ietf.doc.views_doc.add_comment", kwargs=dict(name=draft.name))
         login_testing_unauthorized(self, "secretary", url)
 
         # normal get
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         q = PyQuery(unicontent(r))
-        self.assertEqual(len(q('form textarea[name=comment]')), 1)
+        self.assertEqual(len(q("form textarea[name=comment]")), 1)
 
-        # request resurrect
         events_before = draft.docevent_set.count()
         mailbox_before = len(outbox)
-        
+
         r = self.client.post(url, dict(comment="This is a test."))
         self.assertEqual(r.status_code, 302)
 
@@ -2169,9 +2235,9 @@ class AddCommentTestCase(TestCase):
         self.assertEqual("This is a test.", draft.latest_event().desc)
         self.assertEqual("added_comment", draft.latest_event().type)
         self.assertEqual(len(outbox), mailbox_before + 1)
-        self.assertIn("Comment added", outbox[-1]['Subject'])
-        self.assertIn(draft.name, outbox[-1]['Subject'])
-        self.assertIn('draft-ietf-mars-test@', outbox[-1]['To'])
+        self.assertIn("Comment added", outbox[-1]["Subject"])
+        self.assertIn(draft.name, outbox[-1]["Subject"])
+        self.assertIn("draft-ietf-mars-test@", outbox[-1]["To"])
 
         # Make sure we can also do it as IANA
         self.client.login(username="iana", password="iana+password")
@@ -2180,7 +2246,22 @@ class AddCommentTestCase(TestCase):
         r = self.client.get(url)
         self.assertEqual(r.status_code, 200)
         q = PyQuery(unicontent(r))
-        self.assertEqual(len(q('form textarea[name=comment]')), 1)
+        self.assertEqual(len(q("form textarea[name=comment]")), 1)
+
+        empty_outbox()
+        rfc = WgRfcFactory()
+        self.client.login(username="rfc", password="rfc+password")
+        url = urlreverse("ietf.doc.views_doc.add_comment", kwargs=dict(name=rfc.name))
+        r = self.client.post(
+            url, dict(comment="This is an RFC Editor comment on an RFC.")
+        )
+        self.assertEqual(r.status_code, 302)
+
+        self.assertEqual(
+            "This is an RFC Editor comment on an RFC.", rfc.latest_event().desc
+        )
+        self.assertEqual(len(outbox), 1)
+        self.assertIn("This is an RFC Editor comment on an RFC.", get_payload_text(outbox[0]))
 
 
 class TemplateTagTest(TestCase):

@@ -16,13 +16,13 @@ on:
           - Skip
           - Staging Only
           - Staging + Prod
-      sandbox:
-        description: 'Deploy to Sandbox'
+      dev:
+        description: 'Deploy to Dev'
         default: true
         required: true
         type: boolean
-      sandboxNoDbRefresh:
-        description: 'Sandbox Disable Daily DB Refresh'
+      devNoDbRefresh:
+        description: 'Dev Disable Daily DB Refresh'
         default: false
         required: true
         type: boolean
@@ -66,7 +66,7 @@ jobs:
       base_image_version: ${{ steps.baseimgversion.outputs.base_image_version }}
 
     steps:   
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 1
         fetch-tags: false
@@ -79,6 +79,7 @@ jobs:
         token: ${{ github.token }}
         branch: release
         skipInvalidTags: true
+        patchList: fix, bugfix, perf, refactor, test, tests, chore
 
     - name: Get Dev Version
       if: ${{ github.ref_name != 'release' }}
@@ -97,7 +98,7 @@ jobs:
         echo "IS_RELEASE=true" >> $GITHUB_ENV
         
     - name: Create Draft Release
-      uses: ncipollo/release-action@v1.16.0
+      uses: ncipollo/release-action@v1.21.0
       if: ${{ github.ref_name == 'release' }}
       with:
         prerelease: true
@@ -163,18 +164,18 @@ jobs:
       TARGET_BASE: ${{needs.prepare.outputs.base_image_version}}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 1
         fetch-tags: false
 
     - name: Setup Node.js environment
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v6
       with:
         node-version: 18.x
 
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: "3.x"
 
@@ -185,7 +186,7 @@ jobs:
 
     - name: Download a Coverage Results
       if: ${{ github.event.inputs.skiptests == 'false' || github.ref_name == 'release' }}
-      uses: actions/download-artifact@v4.1.9
+      uses: actions/download-artifact@v8.0.1
       with:
         name: coverage
 
@@ -252,10 +253,10 @@ jobs:
         EOL
 
     - name: Setup Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
 
     - name: Login to GitHub Container Registry
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -266,7 +267,7 @@ jobs:
       run: echo "FEATURE_LATEST_TAG=$(echo $GITHUB_REF_NAME | tr / -)" >> $GITHUB_ENV
 
     - name: Build Images
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       env:
         DOCKER_BUILD_SUMMARY: false
       with:
@@ -277,8 +278,6 @@ jobs:
         tags: |
           ghcr.io/ietf-tools/datatracker:${{ env.PKG_VERSION }}
           ${{ env.FEATURE_LATEST_TAG && format('ghcr.io/ietf-tools/datatracker:{0}-latest', env.FEATURE_LATEST_TAG) || null }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
 
     - name: Update CHANGELOG
       id: changelog
@@ -292,7 +291,7 @@ jobs:
 
     - name: Download Coverage Results
       if: ${{ github.event.inputs.skiptests == 'false' || github.ref_name == 'release' }}
-      uses: actions/download-artifact@v4.1.9
+      uses: actions/download-artifact@v8.0.1
       with:
         name: coverage
 
@@ -316,7 +315,7 @@ jobs:
         histCoveragePath: historical-coverage.json
         
     - name: Create Release
-      uses: ncipollo/release-action@v1.16.0
+      uses: ncipollo/release-action@v1.21.0
       if: ${{ env.SHOULD_DEPLOY == 'true' }}
       with:
         allowUpdates: true
@@ -329,7 +328,7 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Update Baseline Coverage
-      uses: ncipollo/release-action@v1.16.0
+      uses: ncipollo/release-action@v1.21.0
       if: ${{ github.event.inputs.updateCoverage == 'true' || github.ref_name == 'release' }}
       with:
         allowUpdates: true
@@ -342,7 +341,7 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         
     - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: release-${{ env.PKG_VERSION }}
         path: /home/runner/work/release/release.tar.gz
@@ -361,7 +360,7 @@ jobs:
     steps:      
     - name: Notify on Slack (Success)
       if: ${{ !contains(join(needs.*.result, ','), 'failure') }}
-      uses: slackapi/slack-github-action@v2
+      uses: slackapi/slack-github-action@v3
       with:
         token: ${{ secrets.SLACK_GH_BOT }}
         method: chat.postMessage
@@ -376,7 +375,7 @@ jobs:
                   value: "Completed"
     - name: Notify on Slack (Failure)
       if: ${{ contains(join(needs.*.result, ','), 'failure') }}
-      uses: slackapi/slack-github-action@v2
+      uses: slackapi/slack-github-action@v3
       with:
         token: ${{ secrets.SLACK_GH_BOT }}
         method: chat.postMessage
@@ -391,44 +390,45 @@ jobs:
                   value: "Failed"
         
   # -----------------------------------------------------------------
-  # SANDBOX
+  # DEV
   # -----------------------------------------------------------------
-  sandbox:
-    name: Deploy to Sandbox
-    if: ${{ !failure() && !cancelled() && github.event.inputs.sandbox == 'true' }}
+  dev:
+    name: Deploy to Dev
+    if: ${{ !failure() && !cancelled() && github.event.inputs.dev == 'true' }}
     needs: [prepare, release]
-    runs-on: [self-hosted, dev-server]
+    runs-on: ubuntu-latest
     environment:
-      name: sandbox
+      name: dev
     env:
       PKG_VERSION: ${{needs.prepare.outputs.pkg_version}}
       
     steps:
-    - uses: actions/checkout@v4
-        
-    - name: Download a Release Artifact
-      uses: actions/download-artifact@v4.1.9
-      with:
-        name: release-${{ env.PKG_VERSION }}
-        
-    - name: Deploy to containers
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        echo "Reset production flags in settings.py..."
-        sed -i -r -e 's/^DEBUG *= *.*$/DEBUG = True/' -e "s/^SERVER_MODE *= *.*\$/SERVER_MODE = 'development'/" ietf/settings.py
-        echo "Install Deploy to Container CLI dependencies..."
-        cd dev/deploy-to-container
-        npm ci
-        cd ../..
-        echo "Start Deploy..."
-        node ./dev/deploy-to-container/cli.js --branch ${{ github.ref_name }} --domain dev.ietf.org --appversion ${{ env.PKG_VERSION }} --commit ${{ github.sha }} --ghrunid ${{ github.run_id }} --nodbrefresh ${{ github.event.inputs.sandboxNoDbRefresh }}
-        
-    - name: Cleanup old docker resources
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        docker image prune -a -f
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          
+      - name: Get Deploy Name
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "Install Get Deploy Name CLI dependencies..."
+          cd dev/k8s-get-deploy-name
+          npm ci
+          echo "Get Deploy Name..."
+          echo "DEPLOY_NAMESPACE=$(node cli.js --branch ${{ github.ref_name }})" >> "$GITHUB_ENV"
+
+      - name: Deploy to dev
+        uses: the-actions-org/workflow-dispatch@v4
+        with:
+          workflow: deploy-dev.yml
+          repo: ietf-tools/infra-k8s
+          ref: main
+          token: ${{ secrets.GH_INFRA_K8S_TOKEN }}
+          inputs: '{ "app":"datatracker", "appVersion":"${{ env.PKG_VERSION }}", "remoteRef":"${{ github.sha }}", "namespace":"${{ env.DEPLOY_NAMESPACE }}", "disableDailyDbRefresh":${{ inputs.devNoDbRefresh }} }'
+          wait-for-completion: true
+          wait-for-completion-timeout: 60m
+          wait-for-completion-interval: 30s
+          display-workflow-run-url: false
 
   # -----------------------------------------------------------------
   # STAGING
@@ -444,6 +444,19 @@ jobs:
       PKG_VERSION: ${{needs.prepare.outputs.pkg_version}}
       
     steps:
+      - name: Refresh Staging DB
+        uses: the-actions-org/workflow-dispatch@v4
+        with:
+          workflow: deploy-db.yml
+          repo: ietf-tools/infra-k8s
+          ref: main
+          token: ${{ secrets.GH_INFRA_K8S_TOKEN }}
+          inputs: '{ "environment":"${{ secrets.GHA_K8S_CLUSTER }}", "app":"datatracker", "manifest":"postgres", "forceRecreate":true, "restoreToLastFullSnapshot":true, "waitClusterReady":true }'
+          wait-for-completion: true
+          wait-for-completion-timeout: 120m
+          wait-for-completion-interval: 20s
+          display-workflow-run-url: false
+
       - name: Deploy to staging
         uses: the-actions-org/workflow-dispatch@v4
         with:
@@ -453,7 +466,7 @@ jobs:
           token: ${{ secrets.GH_INFRA_K8S_TOKEN }}
           inputs: '{ "environment":"${{ secrets.GHA_K8S_CLUSTER }}", "app":"datatracker", "appVersion":"${{ env.PKG_VERSION }}", "remoteRef":"${{ github.sha }}" }'
           wait-for-completion: true
-          wait-for-completion-timeout: 10m
+          wait-for-completion-timeout: 30m
           wait-for-completion-interval: 30s
           display-workflow-run-url: false
 
@@ -480,6 +493,6 @@ jobs:
           token: ${{ secrets.GH_INFRA_K8S_TOKEN }}
           inputs: '{ "environment":"${{ secrets.GHA_K8S_CLUSTER }}", "app":"datatracker", "appVersion":"${{ env.PKG_VERSION }}", "remoteRef":"${{ github.sha }}" }'
           wait-for-completion: true
-          wait-for-completion-timeout: 10m
+          wait-for-completion-timeout: 30m
           wait-for-completion-interval: 30s
           display-workflow-run-url: false

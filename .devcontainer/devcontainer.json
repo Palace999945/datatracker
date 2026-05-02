@@ -23,7 +23,7 @@
                 "dbaeumer.vscode-eslint",
                 "eamodio.gitlens",
                 "editorconfig.editorconfig",
-                "vue.volar",
+                "vue.volar@2.2.10",
                 "mrmlnc.vscode-duplicate",
                 "ms-azuretools.vscode-docker",
                 "ms-playwright.playwright",
@@ -32,9 +32,8 @@
                 "mutantdino.resourcemonitor",
                 "oderwat.indent-rainbow",
                 "redhat.vscode-yaml",
-                "spmeesseman.vscode-taskexplorer",
-                "visualstudioexptteam.vscodeintellicode",
-                "ms-python.pylint"
+                "ms-python.pylint",
+                "charliermarsh.ruff"
             ],
             "settings": {
                 "terminal.integrated.defaultProfile.linux": "zsh",

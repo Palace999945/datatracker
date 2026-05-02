@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2014-2020, All Rights Reserved
+# Copyright The IETF Trust 2014-2025, All Rights Reserved
 # -*- coding: utf-8 -*-
 
 
@@ -11,7 +11,7 @@ import pytz
 import shutil
 import types
 
-from mock import call, patch
+from unittest.mock import call, patch
 from pyquery import PyQuery
 from typing import Dict, List       # pyflakes:ignore
 
@@ -19,7 +19,6 @@ from email.message import Message
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from fnmatch import fnmatch
 from importlib import import_module
 from textwrap import dedent
 from tempfile import mkdtemp
@@ -55,9 +54,12 @@ from ietf.utils.mail import (
     decode_header_value,
     show_that_mail_was_sent,
 )
-from ietf.utils.test_runner import get_template_paths, set_coverage_checking
+from ietf.utils.test_runner import (
+    get_template_paths,
+    set_template_coverage,
+    set_url_coverage,
+)
 from ietf.utils.test_utils import TestCase, unicontent
-from ietf.utils.text import parse_unicode
 from ietf.utils.timezone import timezone_not_near_midnight
 from ietf.utils.xmldraft import XMLDraft, InvalidMetadataError, capture_xml2rfc_output
 
@@ -312,15 +314,16 @@ def get_callbacks(urllist, namespace=None):
 
     return list(callbacks)
 
-class TemplateChecksTestCase(TestCase):
+class TemplateChecksTestCase(TestCase):  # pragma: no cover
 
     paths = []                          # type: List[str]
     templates = {}                      # type: Dict[str, Template]
 
     def setUp(self):
         super().setUp()
-        set_coverage_checking(False)
-        self.paths = list(get_template_paths())
+        set_template_coverage(False)
+        set_url_coverage(False)
+        self.paths = get_template_paths()  # already filtered ignores
         self.paths.sort()
         for path in self.paths:
             try:
@@ -329,17 +332,14 @@ class TemplateChecksTestCase(TestCase):
                 pass
 
     def tearDown(self):
-        set_coverage_checking(True)
+        set_template_coverage(True)
+        set_url_coverage(True)
         super().tearDown()
 
     def test_parse_templates(self):
         errors = []
         for path in self.paths:
-            for pattern in settings.TEST_TEMPLATE_IGNORE:
-                if fnmatch(path, pattern):
-                    continue
-            if not path in self.templates:
-
+            if path not in self.templates:
                 try:
                     get_template(path)
                 except Exception as e:
@@ -712,6 +712,14 @@ class XMLDraftTests(TestCase):
         self.assertEqual(
             XMLDraft.render_author_name(lxml.etree.Element(
                 "author",
+                fullname=chr(340)+"ich",
+                asciiFullname="Rich UTF-8",
+            )),
+            chr(340)+"ich (Rich UTF-8)",
+        )
+        self.assertEqual(
+            XMLDraft.render_author_name(lxml.etree.Element(
+                "author",
                 fullname="Joanna Q. Public",
                 initials="J. Q.",
                 surname="Public-Private",
@@ -741,6 +749,23 @@ class XMLDraftTests(TestCase):
             "J. Q.",
         )
 
+    @patch("ietf.utils.xmldraft.XMLDraft.__init__", return_value=None)
+    def test_get_title(self, mock_init):
+        xmldraft = XMLDraft("fake")
+        self.assertTrue(mock_init.called)
+        # Stub XML that does not have a front/title element
+        xmldraft.xmlroot = lxml.etree.XML(
+            "<rfc><front></front></rfc>"  # no title
+        )
+        self.assertEqual(xmldraft.get_title(), "")
+
+        # Stub XML that has a front/title element
+        xmldraft.xmlroot = lxml.etree.XML(
+            "<rfc><front><title>This Is the Title</title></front></rfc>"
+        )
+        self.assertEqual(xmldraft.get_title(), "This Is the Title")
+
+        
     def test_capture_xml2rfc_output(self):
         """capture_xml2rfc_output reroutes and captures xml2rfc logs"""
         orig_write_out = xml2rfc_log.write_out
@@ -837,24 +862,6 @@ class LogUtilTests(TestCase):
         settings.SERVER_MODE = 'development'
         assertion('False')
         settings.SERVER_MODE = 'test'
-
-class TestRFC2047Strings(TestCase):
-    def test_parse_unicode(self):
-        names = (
-            ('=?utf-8?b?4Yuz4YuK4Ym1IOGJoOGJgOGIiA==?=', 'ዳዊት በቀለ'),
-            ('=?utf-8?b?5Li9IOmDnA==?=', '丽 郜'),
-            ('=?utf-8?b?4KSV4KSu4KWN4KSs4KWL4KScIOCkoeCkvuCksA==?=', 'कम्बोज डार'),
-            ('=?utf-8?b?zpfPgc6szrrOu861zrnOsSDOm865z4zOvc+Ezrc=?=', 'Ηράκλεια Λιόντη'),
-            ('=?utf-8?b?15nXqdeo15DXnCDXqNeV15bXoNek15zXkw==?=', 'ישראל רוזנפלד'),
-            ('=?utf-8?b?5Li95Y2OIOeahw==?=', '丽华 皇'),
-            ('=?utf-8?b?77ul77qu766V77qzIO+tlu+7ru+vvu+6ju+7pw==?=', 'ﻥﺮﮕﺳ ﭖﻮﯾﺎﻧ'),
-            ('=?utf-8?b?77uh77uu77qz77uu76++IO+6su+7tO+7p++6jSDvurDvu6Pvuo7vu6jvr74=?=', 'ﻡﻮﺳﻮﯾ ﺲﻴﻧﺍ ﺰﻣﺎﻨﯾ'),
-            ('=?utf-8?b?ScOxaWdvIFNhbsOnIEliw6HDsWV6IGRlIGxhIFBlw7Fh?=', 'Iñigo Sanç Ibáñez de la Peña'),
-            ('Mart van Oostendorp', 'Mart van Oostendorp'),
-            ('', ''),
-            )
-        for encoded_str, unicode in names: 
-            self.assertEqual(unicode, parse_unicode(encoded_str))
 
 class TestAndroidSiteManifest(TestCase):
     def test_manifest(self):

@@ -1,4 +1,4 @@
-# Copyright The IETF Trust 2022, All Rights Reserved
+# Copyright The IETF Trust 2022-2025, All Rights Reserved
 # -*- coding: utf-8 -*-
 import datetime
 import io
@@ -102,6 +102,17 @@ class XMLDraft(Draft):
             number = int(maybe_number)
             return f"{label}{number}"
 
+        target = ref.get("target")
+        if isinstance(target, str):
+            target = target.lower()
+            if target.startswith("https://datatracker.ietf.org/doc/"):
+                # len("https://datatracker.ietf.org/doc/")==33
+                m = re.match(r"^(draft-[a-z0-9-]*[a-z0-9])([/-]\d{2})?/?$",target[33:])
+                if m:
+                    name = m.group(1)
+                    return name
+
+
         # if we couldn't find a match so far, try the seriesInfo
         series_query = " or ".join(f"@name='{x.upper()}'" for x in series)
         for info in ref.xpath(
@@ -147,7 +158,8 @@ class XMLDraft(Draft):
         return revmatch.group('filename'), revmatch.group('rev')
 
     def get_title(self):
-        return self.xmlroot.findtext('front/title').strip()
+        title_text = self.xmlroot.findtext('front/title')
+        return "" if title_text is None else title_text.strip()
 
     @staticmethod
     def parse_creation_date(date_elt):
@@ -232,6 +244,12 @@ class XMLDraft(Draft):
         # Use fullname attribute, if present
         fullname = author_elt.attrib.get("fullname", "").strip()
         if fullname:
+            # If any 8bit chars in the fullname, try to append the author's
+            # name in ascii.
+            if any([x >= 0x80 for x in fullname.encode('utf8')]):
+                asciifullname = author_elt.attrib.get("asciiFullname", "").strip()
+                if asciifullname:
+                    fullname = fullname + ' (' + asciifullname + ')'
             return fullname
         surname = author_elt.attrib.get("surname", "").strip()
         initials = author_elt.attrib.get("initials", "").strip()

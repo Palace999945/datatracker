@@ -1,11 +1,11 @@
-# Copyright The IETF Trust 2007-2020, All Rights Reserved
-# -*- coding: utf-8 -*-
+# Copyright The IETF Trust 2007-2026, All Rights Reserved
 
 import debug  # pyflakes:ignore
 
 import datetime
 import unicodedata
 
+from django.conf import settings
 from django.contrib.syndication.views import Feed, FeedDoesNotExist
 from django.utils.feedgenerator import Atom1Feed, Rss201rev2Feed
 from django.urls import reverse as urlreverse
@@ -224,7 +224,7 @@ class RfcFeed(Feed):
         extra.update({"dcterms_accessRights": "gratis"})
         extra.update({"dcterms_format": "text/html"})
         media_contents = []
-        if item.rfc_number < 8650:
+        if item.rfc_number < settings.FIRST_V3_RFC:
             if item.rfc_number not in [8, 9, 51, 418, 500, 530, 589]:
                 for fmt, media_type in [("txt", "text/plain"), ("html", "text/html")]:
                     media_contents.append(
@@ -263,9 +263,11 @@ class RfcFeed(Feed):
                 )
         extra.update({"media_contents": media_contents})
 
-        extra.update({"doi": "10.17487/%s" % item.name.upper()})
         extra.update(
-            {"doiuri": "http://dx.doi.org/10.17487/%s" % item.name.upper()}
+            {
+                "doi": item.doi,
+                "doiuri": f"https://doi.org/{item.doi}",
+            }
         )
 
         # R104 Publisher (Mandatory - but we need a string from them first)

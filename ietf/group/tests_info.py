@@ -6,7 +6,7 @@ import calendar
 import datetime
 import io
 import bleach
-import mock
+from unittest import mock
 
 from unittest.mock import call, patch
 from pathlib import Path
@@ -27,7 +27,7 @@ from django.utils.html import escape
 
 from ietf.community.models import CommunityList
 from ietf.community.utils import reset_name_contains_index_for_rule
-from ietf.doc.factories import WgDraftFactory, IndividualDraftFactory, CharterFactory, BallotDocEventFactory
+from ietf.doc.factories import WgDraftFactory, RgDraftFactory, IndividualDraftFactory, CharterFactory, BallotDocEventFactory
 from ietf.doc.models import Document, DocEvent, State
 from ietf.doc.storage_utils import retrieve_str
 from ietf.doc.utils_charter import charter_name_for_group
@@ -413,6 +413,7 @@ class GroupPagesTests(TestCase):
             self.assertContains(r, draft3.name)
             for ah in draft3.action_holders.all():
                 self.assertContains(r, escape(ah.name))
+            self.assertContains(r, "Active with the IESG Internet-Draft") # draft3 is pub-req hence should have such a divider
             self.assertContains(r, 'for 173 days', count=1)  # the old_dah should be tagged
             self.assertContains(r, draft4.name)
             self.assertNotContains(r, draft5.name)
@@ -424,6 +425,25 @@ class GroupPagesTests(TestCase):
         r = self.client.get(url)
         q = PyQuery(r.content)
         self.assertTrue(any([draft2.name in x.attrib['href'] for x in q('table td a.track-untrack-doc')]))
+
+        # Let's also check the IRTF stream
+        rg = GroupFactory(type_id='rg')
+        setup_default_community_list_for_group(rg)
+        rgDraft = RgDraftFactory(group=rg)
+        rgDraft4 = RgDraftFactory(group=rg)
+        rgDraft4.set_state(State.objects.get(slug='irsg-w'))
+        rgDraft7 = RgDraftFactory(group=rg)
+        rgDraft7.set_state(State.objects.get(type='draft-stream-%s' % rgDraft7.stream_id, slug='dead'))
+        for url in group_urlreverse_list(rg, 'ietf.group.views.group_documents'):
+            with self.settings(DOC_ACTION_HOLDER_MAX_AGE_DAYS=20):
+                r = self.client.get(url)
+            self.assertEqual(r.status_code, 200)
+            self.assertContains(r, rgDraft.name)
+            self.assertContains(r, rg.name)
+            self.assertContains(r, rg.acronym)
+            self.assertNotContains(r, draft3.name) # As draft3 is a WG draft, it should not be listed here
+            self.assertContains(r, rgDraft4.name)
+            self.assertNotContains(r, rgDraft7.name)
 
         # test the txt version too while we're at it
         for url in group_urlreverse_list(group, 'ietf.group.views.group_documents_txt'):
@@ -522,6 +542,25 @@ class GroupPagesTests(TestCase):
     
                 for username in list(set(interesting_users)-set(can_edit[group.type_id])):
                     verify_cannot_edit_group(url, group, username)
+
+    def test_group_about_team_parent(self):
+        """Team about page should show parent when parent is not an area"""
+        GroupFactory(type_id='team', parent=GroupFactory(type_id='area', acronym='gen'))
+        GroupFactory(type_id='team', parent=GroupFactory(type_id='ietf', acronym='iab'))
+        GroupFactory(type_id='team', parent=None)
+
+        for team in Group.objects.filter(type='team').select_related('parent'):
+            url = urlreverse('ietf.group.views.group_about', kwargs=dict(acronym=team.acronym))
+            r = self.client.get(url)
+            self.assertEqual(r.status_code, 200)
+            if team.parent and team.parent.type_id != 'area':
+                self.assertContains(r, 'Parent')
+                self.assertContains(r, team.parent.acronym)
+            elif team.parent and team.parent.type_id == 'area':
+                self.assertContains(r, team.parent.name)
+                self.assertNotContains(r, '>Parent<')
+            else:
+                self.assertNotContains(r, '>Parent<')
 
     def test_group_about_personnel(self):
         """Correct personnel should appear on the group About page"""
